@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: kb-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install .
+    startCommand: uvicorn kb_mcp.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: KB_REPO
+        sync: false
+      - key: MCP_BEARER_TOKENS
+        sync: false
+      - key: KB_BRANCH
+        value: main
+      - key: KB_ROOT_INDEX
+        value: INDEX.md
