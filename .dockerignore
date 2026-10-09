@@ -1,0 +1,10 @@
+**/.env
+**/__pycache__
+**/*.egg-info
+.venv
+.git
+.github
+dist
+docs
+scripts
+*.md
