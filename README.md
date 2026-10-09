@@ -38,3 +38,28 @@ Header values can't be edited. To rotate the token, remove the connector and add
 ## 5. Before a voice session
 
 The free Render instance sleeps after ~15 minutes idle and takes 30–60 s to wake. Open `https://<service>.onrender.com/health` first and wait for `ok`.
+
+## 6. Docker and CI/CD
+
+Build and run the image locally:
+
+```bash
+docker build -t kb-mcp .
+docker run --rm --env-file .env -p 8000:8000 kb-mcp
+```
+
+CI (`.github/workflows/ci.yml`) runs on every pull request and push to `main`: lockfile check, `ruff check`, an image build and a smoke test (`scripts/smoke_image.sh`).
+
+CD (`.github/workflows/cd.yml`) runs on pushes to `main` and on `v*` tags. After CI passes it pushes `<DOCKERHUB_USERNAME>/kb-mcp` to Docker Hub:
+
+| Trigger | Tags |
+|---|---|
+| push to `main` | `latest`, `sha-<short sha>` |
+| tag `v1.2.3` | `1.2.3`, `1.2` |
+
+Add two repository secrets (Settings → Secrets and variables → Actions):
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`: a Docker Hub access token with Read & Write scope
+
+CD only publishes the image. Render keeps deploying from git (`render.yaml`).
