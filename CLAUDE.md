@@ -34,6 +34,7 @@ src/kb_mcp/
   errors.py         KBError hierarchy (subclasses the SDK's ToolError)
   paths.py          normalize_path, the only path sanitizer
   github_reader.py  the only code that talks to GitHub
+  logging_setup.py  log format, LOG_LEVEL, uvicorn log routing
   search.py         pure ranking and snippets
   tools.py          MCP tools and voice-friendly formatting
 scripts/mcp_call.sh call one tool over HTTP for manual checks
@@ -49,7 +50,7 @@ render.yaml         Render blueprint (free web service)
 
 ## Config
 
-`GITHUB_TOKEN` (fine-grained PAT, KB repo only, Contents read-only), `KB_REPO` (`owner/name`), `KB_BRANCH` (default `main`), `KB_ROOT_INDEX` (default `INDEX.md`), `MCP_BEARER_TOKENS` (comma-separated, each at least 32 chars). Template: `.env.example`.
+`GITHUB_TOKEN` (fine-grained PAT, KB repo only, Contents read-only), `KB_REPO` (`owner/name`), `KB_BRANCH` (default `main`), `KB_ROOT_INDEX` (default `INDEX.md`), `MCP_BEARER_TOKENS` (comma-separated, each at least 32 chars), `LOG_LEVEL` (default `INFO`). Template: `.env.example`.
 
 ## Invariants and gotchas
 
@@ -60,7 +61,8 @@ render.yaml         Render blueprint (free web service)
 - Anticipated failures raise a `KBError` subclass, and its message is shown to Claude. Any other exception reaches Claude only as "Error executing tool".
 - The 401 response deliberately has no `WWW-Authenticate` OAuth metadata, so Claude's connector dialog doesn't try OAuth. Bare tokens (no `Bearer ` prefix) are accepted because the connector sends the header value exactly as typed.
 - Tool output is short plain text (`structured_output=False`), because conversations are often spoken. Keep the tool count small and the descriptions explicit.
-- Never log tokens or file contents.
+- Never log tokens, file contents or GitHub redirect URLs. Log lines go to stdout; `docs/docker-run-and-test.md` explains how to read them.
+- The GitHub startup check is non-fatal on purpose: the Docker smoke test starts the container with a dummy token and expects `/health` to answer.
 - Don't use GitHub's code-search API for `search`. Its index lags behind pushes.
 - The Render free tier sleeps after ~15 min idle. Open `/health` before a voice session.
 
