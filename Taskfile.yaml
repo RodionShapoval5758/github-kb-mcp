@@ -1,0 +1,141 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  IMAGE: kb-mcp
+  CONTAINER: kb-mcp
+  PORT: '{{.PORT | default "8000"}}'
+  SMOKE_PORT: '{{.SMOKE_PORT | default "18000"}}'
+  QUERY: '{{.QUERY | default "index"}}'
+  LIB: |
+    set -eu
+    base=http://localhost:{{.PORT}}
+    export MCP_TOKEN="${MCP_TOKEN:-${MCP_BEARER_TOKENS%%,*}}"
+    export MCP_URL="$base/mcp"
+    ok() { echo "ok: $1"; }
+    fail() { echo "FAIL: $1" >&2; exit 1; }
+    eq() { [ "$3" = "$2" ] && ok "$1" || fail "$1: expected '$2', got '$3'"; }
+    has() { case "$3" in *"$2"*) ok "$1" ;; *) fail "$1: expected to contain '$2', got '$3'" ;; esac; }
+    call() { scripts/mcp_call.sh "$@" 2>&1 || true; }
+    rpc() { curl -s -X POST "$MCP_URL" -H "Authorization: Bearer $MCP_TOKEN" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$1"; }
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - "{{.TASK_EXE}} --list"
+
+  build:
+    desc: Build the Docker image
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  run:
+    desc: Build the image and start the container in the background (needs .env)
+    deps: [build]
+    preconditions:
+      - sh: test -f .env
+        msg: ".env is missing. Run: cp .env.example .env, then fill it in"
+    cmds:
+      - task: stop
+      - docker run -d --rm --name {{.CONTAINER}} --env-file .env -p {{.PORT}}:8000 {{.IMAGE}}
+      - task: wait
+
+  wait:
+    internal: true
+    silent: true
+    cmds:
+      - |
+        for i in $(seq 1 30); do
+          if [ "$(curl -s http://localhost:{{.PORT}}/health)" = "ok" ]; then
+            echo "ready: http://localhost:{{.PORT}}/health"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "FAIL: /health did not return ok within 30 s" >&2
+        docker logs --tail 30 {{.CONTAINER}} >&2 || true
+        exit 1
+
+  stop:
+    desc: Stop and remove the container
+    silent: true
+    cmds:
+      - docker rm -f {{.CONTAINER}} >/dev/null 2>&1 || true
+
+  logs:
+    desc: Follow the container logs
+    cmds:
+      - docker logs -f --tail 100 {{.CONTAINER}}
+
+  clean:
+    desc: Stop the container and remove the image
+    cmds:
+      - task: stop
+      - docker rmi {{.IMAGE}} >/dev/null 2>&1 || true
+
+  test:
+    desc: Run server, healthcheck and smoke tests (no real GitHub needed)
+    cmds:
+      - task: test:server
+      - task: test:healthcheck
+      - task: test:smoke
+
+  test:server:
+    desc: "Health, auth, tool list and local validation against the running container"
+    silent: true
+    cmds:
+      - |
+        {{.LIB}}
+        eq "A1 /health returns ok" ok "$(curl -s $base/health)"
+        eq "A2 /mcp without a token returns 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $MCP_URL)"
+        eq "A3 /mcp with a wrong token returns 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $MCP_URL -H 'Authorization: Bearer wrong')"
+        tools=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+        for t in get_context read_file list_dir search; do has "A4 tools/list has $t" "\"$t\"" "$tools"; done
+        has "A5 empty search is rejected" "search needs at least one word" "$(call search '{"query":"  "}')"
+        has "A6 path escape is rejected" "Paths must stay inside the knowledge base" "$(call read_file '{"path":"../x"}')"
+        eq "A8 container runs as non-root" app "$(docker exec {{.CONTAINER}} id -un)"
+        echo "server tests passed"
+
+  test:healthcheck:
+    desc: Wait until Docker reports the container healthy (up to 60 s)
+    silent: true
+    cmds:
+      - |
+        for i in $(seq 1 30); do
+          if [ -n "$(docker ps -q --filter name=^{{.CONTAINER}}$ --filter health=healthy)" ]; then
+            echo "ok: A7 container is healthy"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "FAIL: A7 container is not healthy after 60 s" >&2
+        docker ps --filter name=^{{.CONTAINER}}$ >&2
+        exit 1
+
+  test:smoke:
+    desc: Run scripts/smoke_image.sh on a fresh image (uses its own port and containers)
+    deps: [build]
+    env:
+      SMOKE_PORT: "{{.SMOKE_PORT}}"
+    cmds:
+      - scripts/smoke_image.sh {{.IMAGE}}
+
+  test:kb:
+    desc: "Tools against the real KB repo (needs real GITHUB_TOKEN and KB_REPO in .env). Optional: QUERY=<word>"
+    silent: true
+    preconditions:
+      - sh: '[ -n "${GITHUB_TOKEN:-}" ] && [ "${GITHUB_TOKEN:-}" != dummy ]'
+        msg: "Put a real GITHUB_TOKEN and KB_REPO in .env, then restart the container with the run task"
+    cmds:
+      - |
+        {{.LIB}}
+        index="${KB_ROOT_INDEX:-INDEX.md}"
+        has "C1 get_context returns the root index" "# Root index ($index)" "$(call get_context)"
+        has "C2 list_dir lists the top level" "Contents of (top level):" "$(call list_dir)"
+        has "C3 read_file reads the root index" "# $index" "$(call read_file "{\"path\":\"$index\",\"max_chars\":200}")"
+        has "C4 search finds documents for '{{.QUERY}}'" "documents match" "$(call search "{\"query\":\"{{.QUERY}}\"}")"
+        has "C5 missing file is reported" "Not found in the knowledge base" "$(call read_file '{"path":"no/such/file.md"}')"
+        has "C6 list_dir on a file is rejected" "is a file" "$(call list_dir "{\"path\":\"$index\"}")"
+        echo "KB tests passed"

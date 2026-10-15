@@ -17,3 +17,5 @@ services:
         value: main
       - key: KB_ROOT_INDEX
         value: INDEX.md
+      - key: LOG_LEVEL
+        value: INFO

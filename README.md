@@ -16,6 +16,8 @@ uv run --env-file .env uvicorn kb_mcp.app:app --port 8000
 MCP_TOKEN=<bearer token> scripts/mcp_call.sh get_context
 ```
 
+Logs go to stdout (Render → **Logs** tab, or `docker logs`). Set `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) to change the verbosity. See `docs/docker-run-and-test.md` for what each log line means.
+
 ## 3. Deploy on Render
 
 1. Push this repo to GitHub.

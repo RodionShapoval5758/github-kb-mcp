@@ -3,7 +3,9 @@ import base64
 import io
 import logging
 import tarfile
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
@@ -18,7 +20,29 @@ REPO_UNREACHABLE = (
     "Check KB_REPO, KB_BRANCH and the GitHub token's repository access."
 )
 
+LOW_RATE_LIMIT = 100
+STATUS_HINTS = {
+    401: "GITHUB_TOKEN is invalid or expired",
+    403: "GITHUB_TOKEN lacks Contents read access to KB_REPO, or GitHub's rate limit is exhausted",
+    429: "GitHub is rate limiting this server",
+}
+
 log = logging.getLogger(__name__)
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _warn_if_rate_limit_low(response: httpx.Response) -> None:
+    try:
+        remaining = int(response.headers["x-ratelimit-remaining"])
+    except (KeyError, ValueError):
+        return
+    if remaining < LOW_RATE_LIMIT:
+        reset = response.headers.get("x-ratelimit-reset", "")
+        resets_at = datetime.fromtimestamp(int(reset), UTC).strftime("%H:%M:%SZ") if reset.isdigit() else "unknown"
+        log.warning("GitHub rate limit low: %d requests left, resets at %s", remaining, resets_at)
 
 
 @dataclass(frozen=True)
@@ -66,23 +90,43 @@ class GitHubReader:
         )
 
     async def _get(self, url: str, *, what: str | None, **kwargs) -> httpx.Response:
+        started = time.perf_counter()
         try:
             response = await self._client.get(url, **kwargs)
         except httpx.HTTPError as exc:
-            log.warning("GitHub request %s failed: %r", url, exc)
+            log.warning("GitHub GET %s failed after %d ms: %r", url, _elapsed_ms(started), exc)
             raise KBUnavailableError("Could not reach GitHub. Try again in a moment.") from exc
+        elapsed = _elapsed_ms(started)
+        _warn_if_rate_limit_low(response)
         if response.status_code == 404:
-            log.warning("GitHub request %s returned 404: %s", url, response.text[:300])
+            log.warning("GitHub GET %s -> 404 in %d ms: %s", url, elapsed, response.text[:300])
             # what=None marks a request whose target always exists (the branch itself); GitHub also answers 404
             # when the token can't see a private repo, so a 404 there is a config problem, not a missing file.
             if what is None:
                 raise KBUnavailableError(REPO_UNREACHABLE)
             raise KBNotFoundError(f"Not found in the knowledge base: {what}. Use list_dir or search to find the right path.")
         if response.is_error:
-            log.error("GitHub request %s returned %s: %s", url, response.status_code, response.text[:300])
+            log.error(
+                "GitHub GET %s -> %d in %d ms: %s (request_id=%s, rate limit remaining %s) %s",
+                url,
+                response.status_code,
+                elapsed,
+                STATUS_HINTS.get(response.status_code, "unexpected response from GitHub"),
+                response.headers.get("x-github-request-id", "none"),
+                response.headers.get("x-ratelimit-remaining", "unknown"),
+                response.text[:300],
+            )
             raise KBUnavailableError(
                 "The knowledge base is temporarily unavailable (GitHub refused or rate-limited the request)."
             )
+        remaining = response.headers.get("x-ratelimit-remaining")
+        log.info(
+            "GitHub GET %s -> %d in %d ms%s",
+            url,
+            response.status_code,
+            elapsed,
+            f" (rate limit remaining {remaining})" if remaining else "",
+        )
         return response
 
     async def read_text(self, path: str) -> str:
@@ -134,9 +178,23 @@ class GitHubReader:
         return sorted(children, key=lambda e: (not e.is_dir, e.path.lower()))
 
     async def snapshot_text_files(self) -> list[tuple[str, str]]:
+        started = time.perf_counter()
         response = await self._get(
             f"/repos/{self._repo}/tarball/{quote(self._branch)}",
             what=None,
             timeout=60.0,
         )
-        return await asyncio.to_thread(_extract_text_files, response.content)
+        files = await asyncio.to_thread(_extract_text_files, response.content)
+        log.info(
+            "GitHub tarball: %.1f MB downloaded, %d text files (%.1f MB of text) in %d ms",
+            len(response.content) / 1_000_000,
+            len(files),
+            sum(len(text) for _, text in files) / 1_000_000,
+            _elapsed_ms(started),
+        )
+        return files
+
+    async def check_access(self, root_index: str) -> tuple[str, int]:
+        branch = (await self._get(f"/repos/{self._repo}/branches/{quote(self._branch)}", what=None)).json()
+        text = await self.read_text(root_index)
+        return branch.get("commit", {}).get("sha", "unknown")[:7], len(text)
